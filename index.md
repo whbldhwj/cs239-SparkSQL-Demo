@@ -51,8 +51,8 @@ Note that In Databricks notebooks and Spark REPL, the SparkSession has been crea
 Spark SQL supports operating on a variety of data sources through the DataFrame interface. 
 
 ```scala
-val jsonData = spark.read.json("/FileStore/tables/418k56zy1488673266035/people.json")
-display(jsonData)
+val dataPath = "/FileStore/tables/xpndkxz61488961968033/movie_metadata.csv"
+val movieDF = sqlContext.read.format("com.databricks.spark.csv").option("header","true").option("inferSchema","true").load(dataPath)
 ```
 
 ## Running SQL Queries
@@ -61,17 +61,88 @@ SparkSession can be used to execute SQL queries over data, getting the results b
 A DataFrame can be operated on using relational transformations and can also be used to create a temporary view. Registering a DataFrame as a temporary view allows you to run SQL queries over its data.
 
 ```scala
-jsonData.createOrReplaceTempView("person")
-display(spark.sql("select * from person"))
+movieDF.createOrReplaceTempView("movie")
+display(movieDF)
+display(spark.sql("describe movie"))
+
+spark.sql("select director_name, movie_title  from movie where director_name = 'James Cameron'").show
+spark.sql("select AVG(imdb_score)  from movie where director_name = 'James Cameron'").show
+spark.sql("select movie_title, imdb_score from movie where imdb_score > 9 ").show
 ```
 
 Alternatively, you can use the DataFrame APIs to conduct queries as well.
 
 ```scala
-jsonData.select($"name", $"salary" + 100).show()
-jsonData.filter($"salary" > 3000).show()
-jsonData.groupBy("salary").count().show()
+movieDF.filter("director_name = 'James Cameron'").select($"director_name", $"movie_title").show
+movieDF.filter("director_name = 'James Cameron'").select(avg($"imdb_score")).show
+movieDF.filter("imdb_score > 9").select($"movie_title", $"imdb_score").show
 ```
+
+## More Dataset Operators
+You can refer to [Dataset APIs](http://spark.apache.org/docs/latest/api/scala/index.html#org.apache.spark.sql.Dataset) and [functions](http://spark.apache.org/docs/latest/api/scala/index.html#org.apache.spark.sql.functions$) for more details. org.apache.spark.sql.functions object offers many built-in functions to process values in Columns in Datasets.
+There are over 300 functions in the functions object. Some functions are transformations of Column objects (or column names) into other Column objects or transform DataFrame into DataFrame.
+
+Below we show one example.
+
+```scala
+import org.apache.spark.sql.functions._
+table1.withColumn("director_name", upper($"director_name")).show
+```
+
+## UDFs - User-Defined Functions
+
+User-Defined Functions (aka UDF) is a feature of Spark SQL to define new Column-based functions that extend the vocabulary of Spark SQL’s DSL for transforming Datasets.
+
+```scala
+def makeDT(movie_title: String, director_name: String) = s"1:$movie_title 2:$director_name"
+sqlContext.udf.register("makeDt", makeDT(_:String,_:String))
+sqlContext.sql("SELECT imdb_score, makeDt(movie_title, director_name) from movie").show(10)
+```
+
+# RDDs vs. DataFrame vs. Dataset
+
+With Spark 2.0, there are 3 types of data abstractions which Spark officially provides to use: RDD, DataFrame and Dataset. The following illustration depicts the relationship them.
+
+![spark_ds](spark_ds.png)
+
+Evolution of these abstractions happened in this way:
+
+RDD(Spark 1.0) -> DataFrame (Spark 1.3) -> Dataset (Spark 1.6)
+
+Given the same data, each of the 3 abstractions will compute and give same results to the user. But they differ in performance and the ways they compute. In Spark 2.0, DataFrame APIs have merged with Datasets APIs, unifying data processing capabilities across libraries. In future, Dataset will eventually replace RDD and DataFrame to become the only API spark users should be using in code.
+
+[This thread](http://stackoverflow.com/questions/37301226/difference-between-dataset-api-and-dataframe) on Stack Overflow discusses the differences among these three abstractions in detail. We have made a brief digest as below.
+
+A **resilient distributed dataset (RDD)** is a collection of elements partitioned across the nodes of the cluster that can be operated on in parallel.
+
+However, When working with structured data, RDDs cannot take advantages of Spark’s advanced optimizers including catalyst optimizer and Tungsten execution engine. Developers need to optimize each RDD based on its attributes.
+
+A **DataFrame** is a distributed collection of data organized into named columns. It is conceptually equivalent to a table in a relational database, but with richer optimizations under the hood.
+
+However, Dataframe API does not support compile time safety which limits you from manipulating data when the structure is not know. The following example works during compile time. However, you will get a Runtime exception when executing this code.
+
+```scala
+val dataframe = sqlContect.read.json("people.json") 
+dataframe.filter("salary > 10000").show 
+=> throws Exception : cannot resolve 'salary' given input age , name
+```
+
+Dataset API is an extension to DataFrames that provides a type-safe, object-oriented programming interface. It is a strongly-typed, immutable collection of objects that are mapped to a relational schema.
+
+```scala
+case class Person(name : String , age : Int)
+val personRDD = sc.makeRDD(Seq(Person("A",10),Person("B",20)))
+val personDF = sqlContect.createDataframe(personRDD)
+val ds:Dataset[Person] = personDF.as[Person]
+ds.filter(p => p.age > 25)
+ds.filter(p => p.salary > 25)
+ // error : value salary is not a member of person
+ds.rdd // returns RDD[Person]
+```
+
+The illustration below shows the comparison of SQL vs. DataFrame vs. Dataset.
+
+![image](sql-vs-dataframes-vs-datasets-type-safety-spectrum.png)
 
 ## Creating Datasets
 
@@ -143,100 +214,6 @@ peopleDF.createOrReplaceTempView("people")
 val results = spark.sql("SELECT name FROM people")
 results.map(attributes => "Name: " + attributes(0)).show()
 ```
-
-## More Dataset Operators
-You can refer to [Dataset APIs](http://spark.apache.org/docs/latest/api/scala/index.html#org.apache.spark.sql.Dataset) and [functions](http://spark.apache.org/docs/latest/api/scala/index.html#org.apache.spark.sql.functions$) for more details. Below we show several examples.
-
-```scala
-withColumn(colName: String, col: Column): DataFrame
-```
-withColumn method returns a new DataFrame with the new column col with colName name added.
-```scala
-import org.apache.spark.sql.functions.{col, lit, when}
-peopleDF.withColumn("salary", lit(0)).show
-```
-
-org.apache.spark.sql.functions object offers many built-in functions to process values in Columns in Datasets.
-There are over 300 functions in the functions object. Some functions are transformations of Column objects (or column names) into other Column objects or transform DataFrame into DataFrame.
-
-```scala
-import org.apache.spark.sql.functions._
-peopleDF.withColumn("name2", upper($"name")).show
-```
-
-## UDFs - User-Defined Functions
-
-User-Defined Functions (aka UDF) is a feature of Spark SQL to define new Column-based functions that extend the vocabulary of Spark SQL’s DSL for transforming Datasets.
-
-```scala
-case class Purchase(customer_id: Int, purchase_id: Int, date: String, time: String, tz: String, amount:Double)
-
-val x = sc.parallelize(Array(
-  Purchase(123, 234, "2007-12-12", "20:50", "UTC", 500.99),
-  Purchase(123, 247, "2007-12-12", "15:30", "PST", 300.22),
-  Purchase(189, 254, "2007-12-13", "00:50", "EST", 122.19),
-  Purchase(187, 299, "2007-12-12", "07:30", "UTC", 524.37)
-))
-
-val df = sqlContext.createDataFrame(x)
-df.createOrReplaceTempView("df")
-def makeDT(date: String, time: String, tz: String) = s"$date $time $tz"
-sqlContext.udf.register("makeDt", makeDT(_:String,_:String,_:String))
-
-// Now we can use our function directly in SparkSQL.
-sqlContext.sql("SELECT amount, makeDt(date, time, tz) from df").show
-
-import org.apache.spark.sql.functions.udf
-val makeDt = udf(makeDT(_:String,_:String,_:String))
-
-// now this works
-df.select($"customer_id", makeDt($"date", $"time", $"tz"), $"amount").show
-```
-
-# RDDs vs. DataFrame vs. Dataset
-
-With Spark 2.0, there are 3 types of data abstractions which Spark officially provides to use: RDD, DataFrame and Dataset. The following illustration depicts the relationship them.
-
-![spark_ds](spark_ds.png)
-
-Evolution of these abstractions happened in this way:
-
-RDD(Spark 1.0) -> DataFrame (Spark 1.3) -> Dataset (Spark 1.6)
-
-Given the same data, each of the 3 abstractions will compute and give same results to the user. But they differ in performance and the ways they compute. In Spark 2.0, DataFrame APIs have merged with Datasets APIs, unifying data processing capabilities across libraries. In future, Dataset will eventually replace RDD and DataFrame to become the only API spark users should be using in code.
-
-[This thread](http://stackoverflow.com/questions/37301226/difference-between-dataset-api-and-dataframe) on Stack Overflow discusses the differences among these three abstractions in detail. We have made a breif digest as below.
-
-A **resilient distributed dataset (RDD)** is a collection of elements partitioned across the nodes of the cluster that can be operated on in parallel.
-
-However, When working with structured data, RDDs cannot take advantages of Spark’s advanced optimizers including catalyst optimizer and Tungsten execution engine. Developers need to optimize each RDD based on its attributes.
-
-A **DataFrame** is a distributed collection of data organized into named columns. It is conceptually equivalent to a table in a relational database, but with richer optimizations under the hood.
-
-However, Dataframe API does not support compile time safety which limits you from manipulating data when the structure is not know. The following example works during compile time. However, you will get a Runtime exception when executing this code.
-
-```scala
-val dataframe = sqlContect.read.json("people.json") 
-dataframe.filter("salary > 10000").show 
-=> throws Exception : cannot resolve 'salary' given input age , name
-```
-
-Dataset API is an extension to DataFrames that provides a type-safe, object-oriented programming interface. It is a strongly-typed, immutable collection of objects that are mapped to a relational schema.
-
-```scala
-case class Person(name : String , age : Int)
-val personRDD = sc.makeRDD(Seq(Person("A",10),Person("B",20)))
-val personDF = sqlContect.createDataframe(personRDD)
-val ds:Dataset[Person] = personDF.as[Person]
-ds.filter(p => p.age > 25)
-ds.filter(p => p.salary > 25)
- // error : value salary is not a member of person
-ds.rdd // returns RDD[Person]
-```
-
-The illustration below shows the comparison of SQL vs. DataFrame vs. Dataset.
-
-![image](sql-vs-dataframes-vs-datasets-type-safety-spectrum.png)
 
 # References
 1.	http://stackoverflow.com/questions/37301226/difference-between-dataset-api-and-dataframe
